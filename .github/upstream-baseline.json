@@ -1,0 +1,15 @@
+{
+  "_comment": "本仓库只跟 mariusarva/skyward-pudding。watch-upstream 用它判断有没有新版本，scripts/sync_upstream.py 用它当默认基线。每次升级后手工改这里。",
+  "pudding": {
+    "tag": "v0.3.23",
+    "commit": "aa4b52a",
+    "note": "patches/ 仍停在 v0.3.15。v0.3.16 起都只有 docs：v0.3.16/17 是圆磁贴、任务页、分区管理、关机页、vbmeta 备份、拼音输入（本仓库自己照说明实现），v0.3.23 只在 docs/update.json 换 tag、docs/CHANGES.md 加一行，源码零改动 —— 录屏那部分本来就是从本仓库的 skyward-popsicle-1 分支拿过去的。tag v0.3.23 打在 c05106c（= v0.3.17 那个提交）上，比分支头慢两个提交；跟分支头比跟 tag 准。"
+  },
+  "skyward": {
+    "retired": "2026-11-21",
+    "tag": "v0.3.1",
+    "commit": "c5e09f6",
+    "note": "不再跟。pudding 的补丁就是以这个 tag 为底做的整树 diff，跟 pudding 一个就够；主仓库后面的改动 pudding 里都有。"
+  },
+  "updated": "2026-11-21"
+}

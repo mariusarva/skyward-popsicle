@@ -1,0 +1,23 @@
+target/
+# 本机出包的中间产物与成品（scripts/local_build.py）：原厂 recovery 分区
+# 有 100 MiB，不能进仓库。
+stock/
+out/
+.idea/
+.vscode/
+.DS_Store
+.env
+.env.*
+__pycache__/
+*.pyc
+*.jks
+*.keystore
+keystore.properties
+*.p12
+*.pem
+*.cer
+BRIEF.md
+NOTES.md
+TODO.md
+*.draft.md
+notes/

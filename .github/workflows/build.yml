@@ -1,0 +1,148 @@
+name: Build popsicle
+
+# 只构建 Xiaomi 17 Pro Max（popsicle）这一台，避免像上游那样把 devices/ 里
+# 21 台机器全编一遍（每台都要下载数 GB 官方包，私有仓库的 Actions 额度吃不消）。
+# 推主分支会编译并上传产物；打 v* 标签会额外发布 Release；也能手动触发。
+
+on:
+  push:
+    branches: ["main"]
+    tags: ["v*"]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.ref_type != 'tag' }}
+
+env:
+  CARGO_TERM_COLOR: always
+  DEVICE: popsicle
+
+jobs:
+  tools:
+    name: Build the recovery service and the packer
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v7
+      - uses: ./.github/actions/setup
+      - name: Build the recovery service for the phone
+        run: cargo ndk -t arm64-v8a --platform 30 build --locked --release -p skyward
+      # 它是第二系统的第一个程序，任何库都还没得加载，所以静态链接。
+      - name: Build the second system's first program, static
+        env:
+          RUSTFLAGS: -C target-feature=+crt-static
+        run: cargo ndk -t arm64-v8a --platform 30 build --locked --release -p skyward-system-init --target-dir target/system-init
+      - name: Build the packer
+        run: cargo build --locked --release -p skyward-pack
+      - name: Gather them
+        run: |
+          mkdir tools
+          cp target/aarch64-linux-android/release/skyward target/release/skyward-pack tools/
+          cp target/system-init/aarch64-linux-android/release/system-init tools/
+      - uses: actions/upload-artifact@v7
+        with:
+          name: tools
+          path: tools/
+          if-no-files-found: error
+          retention-days: 1
+
+  recovery:
+    name: Recovery for popsicle
+    needs: [tools]
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/download-artifact@v8
+        with:
+          name: tools
+          path: tools
+      - name: Make the tools runnable
+        run: chmod +x tools/skyward tools/skyward-pack
+      - name: Read the stock build the recovery is made on
+        id: stock
+        run: tools/skyward-pack stock --config "devices/$DEVICE.toml" >> "$GITHUB_OUTPUT"
+      - name: Restore the stock recovery
+        id: cache
+        uses: actions/cache@v6
+        with:
+          path: stock/recovery.img
+          key: stock-recovery-${{ steps.stock.outputs.version }}
+      # 官方包有好几个 GB，这里只取出 recovery 分区。
+      - name: Take the recovery partition out of the stock package
+        if: steps.cache.outputs.cache-hit != 'true'
+        run: tools/skyward-pack stock --config "devices/$DEVICE.toml" --out stock/recovery.img
+      - name: Check the stock recovery
+        env:
+          RECOVERY: ${{ steps.stock.outputs.recovery }}
+        # Empty while the configuration is being aligned to a new stock build:
+        # the pack below prints the sum to write down, and checks it from then on.
+        if: steps.stock.outputs.recovery != ''
+        run: echo "$RECOVERY  stock/recovery.img" | sha256sum --check
+      # 官方 recovery 的 ramdisk 里没有 sbin 那套 HAL（qseecomd / keymint /
+      # gatekeeper / weaver / secure_element / se_omapi / boot-service）、
+      # 没有配套的 system/lib64 库、也没有 CS40L26 的 DSP 固件。缺了它们
+      # 解不开 /data、震动也起不来，所以打包前先把补丁层补进去。
+      - name: Add the HAL layer the stock ramdisk leaves out
+        run: |
+          pip3 install --break-system-packages -q lz4
+          python3 scripts/augment_stock.py --stock stock/recovery.img \
+            --hal resources/popsicle/recovery-hal.zip --out stock/base.img
+      - name: Pack the recovery
+        id: pack
+        env:
+          STOCK: ${{ steps.stock.outputs.version }}
+        run: |
+          if [ "$GITHUB_REF_TYPE" = tag ]; then version="$GITHUB_REF_NAME"; else version="${GITHUB_SHA::7}"; fi
+          name="skyward-$version-$DEVICE-$STOCK"
+          mkdir out
+          tools/skyward-pack recovery --stock stock/base.img --binary tools/skyward --system-init tools/system-init \
+            --config "devices/$DEVICE.toml" --font resources/fonts/MiSansVF.ttf --mono resources/fonts/KirkMono-Regular.ttf \
+            --mono-license resources/fonts/KirkMono-OFL.txt --out "out/$name.img"
+          echo "name=$name" >> "$GITHUB_OUTPUT"
+      # 自检：条目数、补丁层关键文件、AVB 自洽。任何一项不过就让构建红掉，
+      # 免得又交出一个「能开机但解不开 /data」的镜像。
+      - name: Check the packed image
+        env:
+          NAME: ${{ steps.pack.outputs.name }}
+        run: python3 scripts/check_build.py --img "out/$NAME.img"
+      # 镜像整分区刷入，大部分是 recovery 留空的余量，压缩后再发。
+      - name: Zip the image
+        working-directory: out
+        env:
+          NAME: ${{ steps.pack.outputs.name }}
+        run: zip -9 "$NAME.zip" "$NAME.img"
+      - uses: actions/upload-artifact@v7
+        with:
+          path: out/${{ steps.pack.outputs.name }}.zip
+          archive: false
+          if-no-files-found: error
+          retention-days: 7
+
+  release:
+    name: Publish the release
+    if: github.ref_type == 'tag'
+    needs: [recovery]
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/download-artifact@v8
+        with:
+          path: images
+          merge-multiple: true
+          skip-decompress: true
+      - name: Sum the zips
+        working-directory: images
+        run: sha256sum -- *.zip > SHA256SUMS
+      - name: Publish the release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+        run: |
+          model=$(python3 -c 'import sys, tomllib; print(tomllib.load(open(sys.argv[1], "rb"))["device"]["model"])' "devices/$DEVICE.toml")
+          zip=$(ls images/skyward-"$GITHUB_REF_NAME"-"$DEVICE"-*.zip)
+          gh release create "$GITHUB_REF_NAME" --title "$GITHUB_REF_NAME" --generate-notes "$zip#$model ($DEVICE)" images/SHA256SUMS
